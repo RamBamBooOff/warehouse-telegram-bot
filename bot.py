@@ -3,9 +3,10 @@ from telebot import types
 import sqlite3
 from datetime import datetime, date, timedelta
 import time
+import os
 
-# --- НАСТРОЙКИ ---
-TOKEN = '8535742126:AAEV-0tpWPOnLgJ0dcgZQ4pGQmRMhJptIIY'
+TOKEN = os.getenv("BOT_TOKEN")
+
 
 PRICE_VEG = 1.88
 PRICE_FRESH = 0.99
@@ -685,3 +686,4 @@ while True:
         bot.infinity_polling()
     except Exception:
         time.sleep(5)
+
