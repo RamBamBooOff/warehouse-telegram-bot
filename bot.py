@@ -524,15 +524,57 @@ def handle_cycle_setup(message):
     )
 
 @bot.message_handler(func=lambda m: m.chat.id in cycle_waiting)
+@bot.message_handler(func=lambda m: m.chat.id in cycle_waiting)
 def handle_cycle_start_date(message):
     user_id = message.chat.id
-    dt = parse_cycle_start_date(message.text)
-    if not dt:
+    dt_start = parse_cycle_start_date(message.text)
+    
+    if not dt_start:
         bot.send_message(user_id, "Не понял дату. Пример: `01-01-2025`.", parse_mode="Markdown")
         return
-    set_user_cycle_start(user_id, dt.strftime("%Y-%m-%d"))
+
+    # Сохраняем настройки
+    set_user_cycle_start(user_id, dt_start.strftime("%Y-%m-%d"))
     cycle_waiting.discard(user_id)
-    bot.send_message(user_id, f"Напоминания включены. Начало цикла: {dt.strftime('%d-%m-%Y')}.")
+
+    # --- ГЕНЕРИРУЕМ ПРОГНОЗ НА 14 ДНЕЙ ---
+    forecast_lines = []
+    
+    # Будем проверять каждый день, начиная с сегодня (по местному времени)
+    today = get_local_now().date()
+    
+    for i in range(16): # Смотрим на 16 дней вперед
+        check_date = today + timedelta(days=i)
+        
+        # Считаем, какой это день цикла относительно введенной даты старта
+        delta = (check_date - dt_start).days
+        if delta < 0: continue # Этот день был до начала цикла
+        
+        day_idx = delta % 8 # 0..7
+        
+        h, m = get_preset_time_for_day(day_idx)
+        
+        if h is not None:
+            # Красивый формат даты
+            date_str = check_date.strftime("%d.%m")
+            # День недели (по-русски грубо, но понятно)
+            wd = ["Пн","Вт","Ср","Чт","Пт","Сб","Вс"][check_date.weekday()]
+            
+            type_name = "День" if h == 19 else "Утро"
+            forecast_lines.append(f"• {date_str} ({wd}) в {h:02d}:{m:02d} — {type_name}")
+
+    forecast_text = "\n".join(forecast_lines)
+
+    bot.send_message(
+        user_id,
+        f"✅ **Напоминания включены!**\n\n"
+        f"Дата начала цикла: {dt_start.strftime('%d.%m.%Y')}\n"
+        f"Ближайшие напоминания (по времени ЕКБ):\n\n"
+        f"{forecast_text}\n\n"
+        "_(Бот напишет, только если ты сам не записал смену раньше)_",
+        parse_mode="Markdown"
+    )
+
 
 @bot.message_handler(func=lambda m: m.text == BTN_REMIND_OFF)
 def handle_reminder_off(message):
@@ -756,30 +798,41 @@ def get_preset_time_for_day(day_index):
     else: return None, None
 
 def reminder_loop():
+    """Фоновый цикл: проверяет, кому нужно напомнить."""
     while True:
-        now = datetime.now()
+        # ВАЖНО: Используем get_local_now(), чтобы проверять по твоему времени (+5)
+        now = get_local_now()
         today_date = now.date()
         current_minutes = now.hour * 60 + now.minute
+
         users = get_users_with_cycle()
-        
         for user_id, start_str in users:
             if not start_str: continue
-            try: start_date = datetime.strptime(start_str, "%Y-%m-%d").date()
+            try:
+                start_date = datetime.strptime(start_str, "%Y-%m-%d").date()
             except: continue
 
-            delta = (today_date - start_date).days
-            if delta < 0: continue
+            # Сколько дней прошло от начала цикла
+            delta_days = (today_date - start_date).days
+            if delta_days < 0: continue
             
-            day_index = delta % 8
+            # Какой сегодня день цикла (0..7)
+            day_index = delta_days % 8
+            
             h, m = get_preset_time_for_day(day_index)
             if h is None: continue
 
-            target = h * 60 + m
-            if abs(current_minutes - target) <= 5:
+            target_minutes = h * 60 + m
+            
+            # Если сейчас нужное время (±5 минут) и смены за сегодня нет
+            if abs(current_minutes - target_minutes) <= 5:
                 if not user_has_shift_today(user_id):
-                    try: bot.send_message(user_id, "🔔 Напоминание: не забудь записать смену.")
+                    try:
+                        bot.send_message(user_id, "🔔 Напоминание: не забудь записать смену.")
                     except: pass
-        time.sleep(300)
+                    
+        time.sleep(300) # Спим 5 минут
+
 
 if __name__ == "__main__":
     reminder_thread = threading.Thread(target=reminder_loop, daemon=True)
