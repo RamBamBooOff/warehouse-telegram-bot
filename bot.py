@@ -10,6 +10,7 @@ import threading
 # ==========================================
 
 TOKEN = '8535742126:AAEV-0tpWPOnLgJ0dcgZQ4pGQmRMhJptIIY'
+ADMIN_ID = 844947566
 
 # Цены
 PRICE_VEG = 1.88
@@ -745,7 +746,7 @@ def process_step_5(message, field_name):
     save_shift(message.chat.id, veg, fresh, dry, alc, freeze, total)
     sum_boxes = alc + dry + veg + fresh + freeze
 
-    # --- ВОТ ЗДЕСЬ ИЗМЕНЕНИЯ: ДЕТАЛЬНЫЙ РАСЧЕТ ПО СТРОКАМ ---
+    
     # Считаем сумму по каждой категории отдельно для красивого вывода
     sum_alc = alc * PRICE_ALC
     sum_dry = dry * PRICE_DRY
@@ -776,6 +777,67 @@ def process_step_5(message, field_name):
     # Очищаем временные данные
     step_data.pop(message.chat.id, None)
 
+@bot.message_handler(commands=['broadcast'])
+def handle_broadcast(message):
+    # 1. Проверка на админа
+    if message.chat.id != ADMIN_ID:
+        return
+
+    # 2. Получаем текст
+    parts = message.text.split(' ', 1)
+    if len(parts) < 2:
+        bot.send_message(message.chat.id, "⚠️ Ошибка. Пиши так:\n`/broadcast Текст`", parse_mode="Markdown")
+        return
+    
+    text_to_send = parts[1]
+    
+    # 3. База данных
+    conn = sqlite3.connect('earnings.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT user_id FROM users')
+    users = cursor.fetchall()
+    conn.close()
+    
+    # 4. Рассылка
+    count_ok = 0
+    count_err = 0
+    
+    bot.send_message(message.chat.id, f"📢 Начинаю рассылку для {len(users)} пользователей...")
+    
+    for row in users:
+        uid = row[0]
+        try:
+            bot.send_message(uid, f"🔔 **Объявление:**\n\n{text_to_send}", parse_mode="Markdown")
+            count_ok += 1
+            time.sleep(0.1) 
+        except Exception:
+            count_err += 1
+            
+    bot.send_message(
+        message.chat.id,
+        f"✅ **Рассылка завершена!**\n\n"
+        f"Доставлено: {count_ok}\n"
+        f"Не удалось: {count_err}"
+    )
+
+
+@bot.message_handler(commands=['backup'])
+def handle_manual_backup(message):
+    # Проверка на админа
+    if message.chat.id != ADMIN_ID:
+        return
+
+    try:
+        with open('earnings.db', 'rb') as file:
+            bot.send_document(
+                message.chat.id,
+                file,
+                caption=f"📦 **Резервная копия БД**\n📅 {get_local_now().strftime('%d.%m.%Y %H:%M')}",
+                parse_mode="Markdown"
+            )
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ Ошибка:\n{e}")
+
 
 
 # ==========================================
@@ -798,10 +860,34 @@ def get_preset_time_for_day(day_index):
     else: return None, None
 
 def reminder_loop():
-    """Фоновый цикл: проверяет, кому нужно напомнить."""
+    """
+    Фоновый цикл:
+    1. Проверяет напоминания (раз в 5 минут).
+    2. Делает бэкап базы данных админу (раз в сутки).
+    """
+    # Запоминаем дату последнего бэкапа (при запуске считаем, что еще не делали)
+    last_backup_date = None
+
     while True:
-        # ВАЖНО: Используем get_local_now(), чтобы проверять по твоему времени (+5)
         now = get_local_now()
+        
+        # --- БЛОК 1: БЭКАП (Раз в день, например, в 09:00 утра) ---
+        # Если сегодня бэкап еще не делали И сейчас больше 9 утра
+        if now.hour >= 9 and last_backup_date != now.date():
+            try:
+                with open('earnings.db', 'rb') as file:
+                    bot.send_document(
+                        ADMIN_ID,
+                        file,
+                        caption=f"📦 **Авто-бэкап базы данных**\n📅 {now.strftime('%d.%m.%Y')}",
+                        parse_mode="Markdown"
+                    )
+                last_backup_date = now.date() # Запоминаем, что сегодня уже отправили
+            except Exception as e:
+                print(f"Ошибка авто-бэкапа: {e}")
+                # Если ошибка (например, нет сети), попробует снова через 5 минут
+        
+        # --- БЛОК 2: НАПОМИНАНИЯ (Твой старый код) ---
         today_date = now.date()
         current_minutes = now.hour * 60 + now.minute
 
@@ -812,19 +898,15 @@ def reminder_loop():
                 start_date = datetime.strptime(start_str, "%Y-%m-%d").date()
             except: continue
 
-            # Сколько дней прошло от начала цикла
             delta_days = (today_date - start_date).days
             if delta_days < 0: continue
             
-            # Какой сегодня день цикла (0..7)
             day_index = delta_days % 8
-            
             h, m = get_preset_time_for_day(day_index)
             if h is None: continue
 
             target_minutes = h * 60 + m
             
-            # Если сейчас нужное время (±5 минут) и смены за сегодня нет
             if abs(current_minutes - target_minutes) <= 5:
                 if not user_has_shift_today(user_id):
                     try:
@@ -832,6 +914,7 @@ def reminder_loop():
                     except: pass
                     
         time.sleep(300) # Спим 5 минут
+
 
 
 if __name__ == "__main__":
