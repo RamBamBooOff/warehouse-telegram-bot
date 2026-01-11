@@ -44,6 +44,9 @@ BTN_STAT_PREV_FULL = "📅 Прошлый месяц (все смены)"
 BTN_STAT_CURR_1_15 = "📆 Текущий месяц: 1–15"
 BTN_STAT_CURR_16_END = "📆 Текущий месяц: 16–конец"
 
+# Часовой пояс
+TIMEZONE_OFFSET = 5
+
 bot = telebot.TeleBot(TOKEN)
 
 # Глобальные переменные состояния (для пошаговых действий)
@@ -91,10 +94,15 @@ init_db()
 #          ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ==========================================
 
+def get_local_now():
+    """Возвращает текущее время с учетом часового пояса пользователя"""
+    return datetime.now() + timedelta(hours=TIMEZONE_OFFSET)
+
 def is_morning():
-    now = datetime.now()
+    now = get_local_now()  # <-- Используем наше время
     h = now.hour
     return MORNING_START_HOUR <= h <= MORNING_END_HOUR
+
 
 def months_diff(h_year, h_month):
     today = date.today()
@@ -106,14 +114,14 @@ def get_prev_month(year: int, month: int):
     return year, month - 1
 
 def get_logical_month_for_now():
-    now = datetime.now()
+    now = get_local_now()  # <-- Изменено
     y, m = now.year, now.month
     if now.day == 1 and now.hour < 12:
         y, m = get_prev_month(y, m)
     return f"{y:04d}-{m:02d}"
 
 def get_current_and_previous_logical_month():
-    now = datetime.now()
+    now = get_local_now()  # <-- Изменено
     y, m = now.year, now.month
     if now.day == 1 and now.hour < 12:
         cur_y, cur_m = get_prev_month(y, m)
@@ -122,6 +130,7 @@ def get_current_and_previous_logical_month():
 
     prev_y, prev_m = get_prev_month(cur_y, cur_m)
     return f"{cur_y:04d}-{cur_m:02d}", f"{prev_y:04d}-{prev_m:02d}"
+
 
 # --- Работа с пользователями (Users) ---
 
@@ -235,16 +244,23 @@ def calculate_income(veg, fresh, dry, alc, freeze, user_id):
 def save_shift(user_id, veg, fresh, dry, alc, freeze, total):
     conn = sqlite3.connect('earnings.db')
     cursor = conn.cursor()
-    now = datetime.now()
+    
+    now = get_local_now()  # <-- ВАЖНО: берем правильное время
+    
     current_date = now.strftime("%Y-%m-%d")
     end_dt = now.strftime("%Y-%m-%d %H:%M:%S")
     logical_month = get_logical_month_for_now()
+    
     cursor.execute('''
-        INSERT INTO shifts (user_id, date, veg_qty, fresh_qty, dry_qty, alc_qty, freeze_qty, total_income, end_datetime, logical_month)
+        INSERT INTO shifts (
+            user_id, date, veg_qty, fresh_qty, dry_qty, alc_qty, freeze_qty,
+            total_income, end_datetime, logical_month
+        )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', (user_id, current_date, veg, fresh, dry, alc, freeze, total, end_dt, logical_month))
     conn.commit()
     conn.close()
+
 
 def get_month_sum_by_logical(user_id, logical_month):
     conn = sqlite3.connect('earnings.db')
@@ -313,7 +329,7 @@ def format_shifts_list(rows):
     return "\n".join(lines), avg
 
 def get_today_shifts_count(user_id=None):
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = get_local_now().strftime("%Y-%m-%d")  # <-- Изменено
     conn = sqlite3.connect('earnings.db')
     cursor = conn.cursor()
     if user_id is None:
@@ -323,6 +339,7 @@ def get_today_shifts_count(user_id=None):
     result = cursor.fetchone()[0]
     conn.close()
     return result or 0
+
 
 def get_stats_30_days():
     """
@@ -558,13 +575,19 @@ def handle_month(message):
 
 @bot.message_handler(func=lambda m: m.text == BTN_INFO)
 def handle_info(message):
-    # Собираем все цифры
-    total_users_all_time = get_total_users()          # Всего регистраций за всё время
-    user_today = get_today_shifts_count(message.chat.id) # Твои расчёты сегодня
-    all_today = get_today_shifts_count(None)          # Всего расчётов сегодня (всеми)
-    
-    # Новые данные за 30 дней
+    # 1. Сбор статистики
+    total_users_all_time = get_total_users()
+    user_today = get_today_shifts_count(message.chat.id)
+    all_today = get_today_shifts_count(None)
     calcs_30, people_30 = get_stats_30_days()
+
+    # 2. Получение времени
+    server_now = datetime.now()        # Реальное время сервера (обычно UTC)
+    user_now = get_local_now()         # Время с твоей поправкой (+5)
+
+    # Форматируем в красивый вид: ДД.ММ ЧЧ:ММ
+    server_str = server_now.strftime("%d.%m %H:%M")
+    user_str = user_now.strftime("%d.%m %H:%M")
 
     bot.send_message(
         message.chat.id,
@@ -578,9 +601,14 @@ def handle_info(message):
         
         "📆 **Сегодня:**\n"
         f"• Твоих расчётов: **{user_today}**\n"
-        f"• Всего по боту: **{all_today}**",
+        f"• Всего по боту: **{all_today}**\n\n"
+        
+        "🕒 **Проверка времени:**\n"
+        f"🖥 Сервер: `{server_str}`\n"
+        f"🏠 Твоё: `{user_str}`",
         parse_mode="Markdown"
     )
+
 
 
 @bot.message_handler(func=lambda m: m.text == BTN_SUPPORT)
