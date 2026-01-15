@@ -1,3 +1,4 @@
+import os
 import telebot
 from telebot import types
 import sqlite3
@@ -9,7 +10,7 @@ import threading
 #               КОНФИГУРАЦИЯ
 # ==========================================
 
-TOKEN = '8535742126:AAEV-0tpWPOnLgJ0dcgZQ4pGQmRMhJptIIY'
+TOKEN = os.getenv('BOT_TOKEN')
 ADMIN_ID = 844947566
 
 # Цены
@@ -777,32 +778,45 @@ def process_step_5(message, field_name):
     # Очищаем временные данные
     step_data.pop(message.chat.id, None)
 
-@bot.message_handler(commands=['broadcast'])
+# Придумай сложное имя команды (никто не должен его знать)
+SECRET_CMD = "super_admin_msg_9911" 
+# Придумай пароль для рассылки
+BROADCAST_PASS = "7733"
+
+@bot.message_handler(commands=[SECRET_CMD])
 def handle_broadcast(message):
-    # 1. Проверка на админа
+    # 1. Проверка на админа по ID (как и было)
     if message.chat.id != ADMIN_ID:
         return
 
-    # 2. Получаем текст
-    parts = message.text.split(' ', 1)
-    if len(parts) < 2:
-        bot.send_message(message.chat.id, "⚠️ Ошибка. Пиши так:\n`/broadcast Текст`", parse_mode="Markdown")
+    # 2. Разбираем сообщение: /команда ПАРОЛЬ Текст
+    parts = message.text.split(' ', 2) # Делим максимум на 3 части
+    
+    # Должно быть 3 части: [команда, пароль, текст]
+    if len(parts) < 3:
+        bot.send_message(message.chat.id, "⚠️ Формат: `/команда ПАРОЛЬ Текст`", parse_mode="Markdown")
         return
     
-    text_to_send = parts[1]
+    password = parts[1]
+    text_to_send = parts[2]
     
-    # 3. База данных
+    # 3. Проверка пароля
+    if password != BROADCAST_PASS:
+        bot.send_message(message.chat.id, "⛔️ Неверный пароль!")
+        return
+    
+    # 4. Получаем список пользователей
     conn = sqlite3.connect('earnings.db')
     cursor = conn.cursor()
     cursor.execute('SELECT user_id FROM users')
     users = cursor.fetchall()
     conn.close()
     
-    # 4. Рассылка
+    # 5. Рассылка
     count_ok = 0
     count_err = 0
     
-    bot.send_message(message.chat.id, f"📢 Начинаю рассылку для {len(users)} пользователей...")
+    bot.send_message(message.chat.id, f"📢 Рассылка началась ({len(users)} получателей)...")
     
     for row in users:
         uid = row[0]
@@ -815,10 +829,9 @@ def handle_broadcast(message):
             
     bot.send_message(
         message.chat.id,
-        f"✅ **Рассылка завершена!**\n\n"
-        f"Доставлено: {count_ok}\n"
-        f"Не удалось: {count_err}"
+        f"✅ **Готово!**\nДоставлено: {count_ok}\nОшибок: {count_err}"
     )
+
 
 
 @bot.message_handler(commands=['backup'])
@@ -861,59 +874,42 @@ def get_preset_time_for_day(day_index):
 
 def reminder_loop():
     """
-    Фоновый цикл:
-    1. Проверяет напоминания (раз в 5 минут).
-    2. Делает бэкап базы данных админу (раз в сутки).
+    Фоновый цикл: ТОЛЬКО напоминания.
+    Авто-бэкап убран для безопасности.
     """
-    # Запоминаем дату последнего бэкапа (при запуске считаем, что еще не делали)
-    last_backup_date = None
-
     while True:
-        now = get_local_now()
-        
-        # --- БЛОК 1: БЭКАП (Раз в день, например, в 09:00 утра) ---
-        # Если сегодня бэкап еще не делали И сейчас больше 9 утра
-        if now.hour >= 9 and last_backup_date != now.date():
-            try:
-                with open('earnings.db', 'rb') as file:
-                    bot.send_document(
-                        ADMIN_ID,
-                        file,
-                        caption=f"📦 **Авто-бэкап базы данных**\n📅 {now.strftime('%d.%m.%Y')}",
-                        parse_mode="Markdown"
-                    )
-                last_backup_date = now.date() # Запоминаем, что сегодня уже отправили
-            except Exception as e:
-                print(f"Ошибка авто-бэкапа: {e}")
-                # Если ошибка (например, нет сети), попробует снова через 5 минут
-        
-        # --- БЛОК 2: НАПОМИНАНИЯ (Твой старый код) ---
-        today_date = now.date()
-        current_minutes = now.hour * 60 + now.minute
+        try:
+            now = get_local_now()
+            today_date = now.date()
+            current_minutes = now.hour * 60 + now.minute
 
-        users = get_users_with_cycle()
-        for user_id, start_str in users:
-            if not start_str: continue
-            try:
-                start_date = datetime.strptime(start_str, "%Y-%m-%d").date()
-            except: continue
+            users = get_users_with_cycle()
+            for user_id, start_str in users:
+                if not start_str: continue
+                try:
+                    start_date = datetime.strptime(start_str, "%Y-%m-%d").date()
+                except: continue
 
-            delta_days = (today_date - start_date).days
-            if delta_days < 0: continue
-            
-            day_index = delta_days % 8
-            h, m = get_preset_time_for_day(day_index)
-            if h is None: continue
+                delta_days = (today_date - start_date).days
+                if delta_days < 0: continue
+                
+                day_index = delta_days % 8
+                h, m = get_preset_time_for_day(day_index)
+                if h is None: continue
 
-            target_minutes = h * 60 + m
-            
-            if abs(current_minutes - target_minutes) <= 5:
-                if not user_has_shift_today(user_id):
-                    try:
-                        bot.send_message(user_id, "🔔 Напоминание: не забудь записать смену.")
-                    except: pass
+                target_minutes = h * 60 + m
+                
+                # Если сейчас нужное время (±5 минут)
+                if abs(current_minutes - target_minutes) <= 5:
+                    if not user_has_shift_today(user_id):
+                        try:
+                            bot.send_message(user_id, "🔔 Напоминание: не забудь записать смену.")
+                        except: pass
+        except Exception as e:
+            print(f"Ошибка в цикле напоминаний: {e}")
                     
         time.sleep(300) # Спим 5 минут
+
 
 
 
