@@ -6,16 +6,8 @@ from datetime import datetime, date, timedelta
 import time
 import threading
 import base64
-import json
-
-# --- БЕЗОПАСНЫЙ ИМПОРТ GIGACHAT ---
-try:
-    from gigachat import GigaChat
-    GIGACHAT_AVAILABLE = True
-except ImportError:
-    GIGACHAT_AVAILABLE = False
-    print("⚠️ ОШИБКА: Библиотека gigachat не найдена! Функция распознавания не будет работать.")
-# ----------------------------------
+import json 
+from gigachat import GigaChat
 
 
 # ==========================================
