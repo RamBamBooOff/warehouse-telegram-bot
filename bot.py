@@ -5,6 +5,18 @@ import sqlite3
 from datetime import datetime, date, timedelta
 import time
 import threading
+import base64
+import json
+
+# --- БЕЗОПАСНЫЙ ИМПОРТ GIGACHAT ---
+try:
+    from gigachat import GigaChat
+    GIGACHAT_AVAILABLE = True
+except ImportError:
+    GIGACHAT_AVAILABLE = False
+    print("⚠️ ОШИБКА: Библиотека gigachat не найдена! Функция распознавания не будет работать.")
+# ----------------------------------
+
 
 # ==========================================
 #               КОНФИГУРАЦИЯ
@@ -12,19 +24,13 @@ import threading
 
 TOKEN = os.getenv('BOT_TOKEN')
 ADMIN_ID = 844947566
-
-# Цены
-PRICE_VEG = 1.88
-PRICE_FRESH = 0.99
-PRICE_DRY = 1.08
-PRICE_ALC = 1.08
-PRICE_FREEZE = 1.36 
+CONFIG_FILE = 'bot_config.json'
 
 # Часы утренней смены
 MORNING_START_HOUR = 5 
 MORNING_END_HOUR = 11
 
-# Названия кнопок (чтобы не путаться в тексте)
+# Названия кнопок 
 BTN_NEW_SHIFT = "🧮 Новая смена (по этапам)"
 BTN_MONTH_TOTAL = "💰 Итог за месяц"
 BTN_STATS = "📊 Статистика"
@@ -48,6 +54,77 @@ BTN_STAT_CURR_16_END = "📆 Текущий месяц: 16–конец"
 
 # Часовой пояс
 TIMEZONE_OFFSET = 5
+
+DEFAULT_CONFIG = {
+    # Цены на категории (теперь только в конфиге)
+    "price_veg": 1.88,
+    "price_fresh": 0.99,
+    "price_dry": 1.08,
+    "price_alc": 1.08,
+    "price_freeze": 1.36,
+    
+    "norm": 1852.0,            # Норма (бывшая 1852)
+    "rate_coeff": 1.15,        # Коэффициент (бывший 1.15)
+    "gold_rate_coeff": 2.0,    # Коэффициент "Золотые короба" (бывший 2)
+    
+    "hourly_rate": 242.42,     # Оклад в час (бывший 242.42)
+    "work_hours_per_shift": 10.5, # Рабочие часы за смену (бывший 10.5)
+    "premium_to_hourly_pct": 0.22, # Премия к окладу (22% = 0.22)
+    "night_shift_premium_pct": 0.20, # Премия за ночные/утренние часы (20% = 0.20)
+    
+    "seniority_bonus_6_12_months_pct": 0.05,  # Стаж 6-12 мес (5%)
+    "seniority_bonus_12_24_months_pct": 0.10, # Стаж 12-24 мес (10%)
+    "seniority_bonus_24_36_months_pct": 0.12, # Стаж 24-36 мес (12%)
+    "seniority_bonus_36_plus_months_pct": 0.15 # Стаж 36+ мес (15%)
+}
+
+# Описания переменных для админа (чтобы не забыть, что есть что)
+CONFIG_DESCRIPTIONS = {
+    "price_veg": "🥦 Цена: Овощи",
+    "price_fresh": "🍎 Цена: Фреш",
+    "price_dry": "📦 Цена: Сухой",
+    "price_alc": "🍷 Цена: Алкоголь",
+    "price_freeze": "❄️ Цена: Заморозка",
+    
+    "norm": "🎯 Норма выручки (S)",
+    "rate_coeff": "✖️ Коэффициент (обычный, 1.15)",
+    "gold_rate_coeff": "🌟 Коэффициент (золотой, 2.0)",
+    
+    "hourly_rate": "💵 Часовая ставка (оклад)",
+    "work_hours_per_shift": "⏱ Часов в смене (10.5)",
+    "premium_to_hourly_pct": "📈 Премия к окладу (0.22 = 22%)",
+    "night_shift_premium_pct": "🌃 Надбавка за утро/ночь (0.20 = 20%)",
+    
+    "seniority_bonus_6_12_months_pct": "🥉 Стаж 6-12 мес (0.05)",
+    "seniority_bonus_12_24_months_pct": "🥈 Стаж 12-24 мес (0.10)",
+    "seniority_bonus_24_36_months_pct": "🥇 Стаж 24-36 мес (0.12)",
+    "seniority_bonus_36_plus_months_pct": "👑 Стаж 36+ мес (0.15)"
+}
+
+# Глобальная переменная для конфига
+cfg = {}
+
+def load_config():
+    global cfg
+    try:
+        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+            cfg = json.load(f)
+        # Проверяем, все ли ключи на месте, если нет — берем из дефолта
+        for k, v in DEFAULT_CONFIG.items():
+            if k not in cfg:
+                cfg[k] = v
+        # Сохраняем, чтобы новые дефолтные значения попали в файл
+        save_config() 
+    except FileNotFoundError:
+        cfg = DEFAULT_CONFIG.copy()
+        save_config()
+
+def save_config():
+    with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+        json.dump(cfg, f, indent=4, ensure_ascii=False) # ensure_ascii=False для корректного отображения кириллицы
+
+# Загружаем конфиг при старте
+load_config()
 
 bot = telebot.TeleBot(TOKEN)
 
@@ -136,21 +213,30 @@ def get_current_and_previous_logical_month():
 
 # --- Работа с пользователями (Users) ---
 
-def get_experience_bonus(user_id):
+def get_experience_percent(user_id):
+    """Возвращает процент надбавки за стаж (0.05, 0.10 и т.д.)"""
     conn = sqlite3.connect('earnings.db')
     cursor = conn.cursor()
     cursor.execute('SELECT hired_year, hired_month FROM users WHERE user_id = ?', (user_id,))
     row = cursor.fetchone()
     conn.close()
+    
     if not row or row[0] is None or row[1] is None:
         return 0.0
+        
     h_year, h_month = row
     m = months_diff(h_year, h_month)
-    if m < 6: return 0.0
-    elif 6 <= m < 12: return 127.25
-    elif 12 <= m < 24: return 254.0
-    elif 24 <= m < 36: return 305.4
-    else: return 381.75
+    
+    if m < 6: 
+        return 0.0
+    elif 6 <= m < 12: 
+        return cfg['seniority_bonus_6_12_months_pct']
+    elif 12 <= m < 24: 
+        return cfg['seniority_bonus_12_24_months_pct']
+    elif 24 <= m < 36: 
+        return cfg['seniority_bonus_24_36_months_pct']
+    else: 
+        return cfg['seniority_bonus_36_plus_months_pct']
 
 def save_user_hire_date(user_id, year, month):
     conn = sqlite3.connect('earnings.db')
@@ -211,36 +297,77 @@ def get_total_users():
 # --- Расчеты и работа со сменами (Shifts) ---
 
 def calculate_income(veg, fresh, dry, alc, freeze, user_id):
-    base = (veg * PRICE_VEG + fresh * PRICE_FRESH + dry * PRICE_DRY + alc * PRICE_ALC + freeze * PRICE_FREEZE)
-    detail_lines = []
-    detail_lines.append(f"Базовая сумма S = {base:.2f} руб.")
-
-    if base > 1840:
-        x = base - 1840
-        y = x * 2.5
-        z = y + 5404.9
-        # Используем символ '×' вместо '*', чтобы не ломать Markdown
-        detail_lines.append(f"S > 1840 → ({base:.2f} - 1840) × 2.5 + 5404.9 = {z:.2f}")
-    else:
-        z = base + 3104.9
-        detail_lines.append(f"S ≤ 1840 → {base:.2f} + 3104.9 = {z:.2f}")
-
-    if is_morning():
-        z += 300
-        detail_lines.append(f"Смена утром → +300 руб. = {z:.2f}")
-    else:
-        detail_lines.append(f"Смена не утром → без доплаты = {z:.2f}")
-
-    bonus = get_experience_bonus(user_id)
+    # 1. Считаем базовую сумму по коробкам (base_sum_boxes, аналог S)
+    # Цены берем из конфига cfg
+    base_sum_boxes = (
+        veg * cfg['price_veg'] + 
+        fresh * cfg['price_fresh'] + 
+        dry * cfg['price_dry'] + 
+        alc * cfg['price_alc'] + 
+        freeze * cfg['price_freeze']
+    )
     
-    if bonus > 0:
-        total = z + bonus
-        detail_lines.append(f"Доплата за стаж: +{bonus:.2f} руб. = {total:.2f}")
+    detail_lines = []
+    detail_lines.append(f"📦 Сумма коробок S = {base_sum_boxes:.2f} руб.")
+    
+    # Константы для краткости из конфига
+    NORM_THRESHOLD = cfg['norm']
+    MAIN_RATE_COEFF = cfg['rate_coeff']
+    GOLD_BOX_MULTIPLIER = cfg['gold_rate_coeff']
+    HOURLY_WAGE = cfg['hourly_rate']
+    SHIFT_HOURS = cfg['work_hours_per_shift']
+    PREMIUM_TO_WAGE_PCT = cfg['premium_to_hourly_pct']   # 22%
+    NIGHT_SHIFT_PREMIUM_RATE_PCT = cfg['night_shift_premium_pct'] # 20%
+    
+    # 2. Считаем фиксированную часть (Оклад + 22%) * 10.5
+    # Эта часть постоянна для обоих основных расчетов (S >= NORM_THRESHOLD и S < NORM_THRESHOLD)
+    fixed_base_income_part = (HOURLY_WAGE * (1 + PREMIUM_TO_WAGE_PCT)) * SHIFT_HOURS
+    
+    # 3. Основная формула дохода на основе суммы коробок (income_from_boxes_and_fixed, аналог A)
+    income_from_boxes_and_fixed = 0.0
+    if base_sum_boxes >= NORM_THRESHOLD:
+        # (S - Норма) * Коэффициент * ЗолотойКоэффициент + Норма * Коэффициент + Фикс. часть
+        # Доплата за перевыполнение нормы (золотые короба)
+        over_norm_bonus = (base_sum_boxes - NORM_THRESHOLD) * MAIN_RATE_COEFF * GOLD_BOX_MULTIPLIER
+        # Доплата за достижение нормы
+        norm_achieved_payout = NORM_THRESHOLD * MAIN_RATE_COEFF
+        
+        income_from_boxes_and_fixed = over_norm_bonus + norm_achieved_payout + fixed_base_income_part
+        detail_lines.append(f"S ≥ {NORM_THRESHOLD:.2f} → Перевыполнение + Норма + Фикс. оклад")
+        detail_lines.append(f"Промежуточный итог (формула А) = {income_from_boxes_and_fixed:.2f}")
     else:
-        total = z
-        detail_lines.append("Доплата за стаж не начисляется (меньше 6 месяцев).")
+        # S + Фикс. часть
+        income_from_boxes_and_fixed = base_sum_boxes + fixed_base_income_part
+        detail_lines.append(f"S < {NORM_THRESHOLD:.2f} → S + Фикс. оклад")
+        detail_lines.append(f"Промежуточный итог (формула А) = {income_from_boxes_and_fixed:.2f}")
 
-    return total, base, detail_lines, bonus
+    # 4. Проверка на утреннюю смену (income_after_morning_premium, аналог D)
+    # Если смена утром: income_from_boxes_and_fixed + (Оклад * 20%) * Часы
+    morning_shift_additional_premium = 0.0
+    if is_morning():
+        morning_shift_additional_premium = (HOURLY_WAGE * NIGHT_SHIFT_PREMIUM_RATE_PCT) * SHIFT_HOURS
+        income_after_morning_premium = income_from_boxes_and_fixed + morning_shift_additional_premium
+        detail_lines.append(f"🌅 Расчеты проведены утром (+{NIGHT_SHIFT_PREMIUM_RATE_PCT*100:.0f}%): +{morning_shift_additional_premium:.2f} руб.")
+    else:
+        income_after_morning_premium = income_from_boxes_and_fixed
+        detail_lines.append("🏙 Расчеты проведены вечером: без доплаты за ночные.")
+    
+    detail_lines.append(f"Итог после доплаты за ночь (формула D) = {income_after_morning_premium:.2f}")
+
+    # 5. Доплата за стаж
+    # final_income = income_after_morning_premium + (Оклад * процент_стажа) * Часы
+    seniority_bonus_percentage = get_experience_percent(user_id) # вернет, например, 0.05
+    
+    seniority_bonus_amount = 0.0
+    if seniority_bonus_percentage > 0:
+        seniority_bonus_amount = (HOURLY_WAGE * seniority_bonus_percentage) * SHIFT_HOURS
+        final_total_income = income_after_morning_premium + seniority_bonus_amount
+        detail_lines.append(f"🎖 Доплата за стаж ({seniority_bonus_percentage*100:.0f}%): +{seniority_bonus_amount:.2f} руб.")
+    else:
+        final_total_income = income_after_morning_premium
+        detail_lines.append("Стаж менее 6 месяцев: доплата 0 руб.")
+
+    return final_total_income, base_sum_boxes, detail_lines, seniority_bonus_amount
 
 
 def save_shift(user_id, veg, fresh, dry, alc, freeze, total):
@@ -729,47 +856,49 @@ def process_step_4(message, field_name):
 def process_step_5(message, field_name):
     # Получаем последнее число (заморозка)
     val = parse_number_from_message(message)
-    if val is None: return bot.send_message(message.chat.id, "❌ Число!")
+    if val is None: 
+        bot.send_message(message.chat.id, "❌ Число!")
+        return # Важно добавить return, чтобы бот не пытался продолжить с некорректным значением
     step_data[message.chat.id][field_name] = val
 
     # Достаем все сохраненные данные
     d = step_data.get(message.chat.id)
     alc, dry, veg, fresh, freeze = d['alc'], d['dry'], d['veg'], d['fresh'], d['freeze']
     
-    # Считаем итог
-    total, base, lines, bonus = calculate_income(veg, fresh, dry, alc, freeze, message.chat.id)
+    # Считаем итог, используя обновленную функцию calculate_income
+    final_total_income, base_sum_boxes, calculation_details, seniority_bonus_for_display = calculate_income(veg, fresh, dry, alc, freeze, message.chat.id)
     
     # Считаем прогноз за месяц
     lm, _ = get_current_and_previous_logical_month()
-    sum_after = get_month_sum_by_logical(message.chat.id, lm) + total
+    sum_after = get_month_sum_by_logical(message.chat.id, lm) + final_total_income
     
     # Сохраняем в базу
-    save_shift(message.chat.id, veg, fresh, dry, alc, freeze, total)
+    save_shift(message.chat.id, veg, fresh, dry, alc, freeze, final_total_income)
     sum_boxes = alc + dry + veg + fresh + freeze
 
     
-    # Считаем сумму по каждой категории отдельно для красивого вывода
-    sum_alc = alc * PRICE_ALC
-    sum_dry = dry * PRICE_DRY
-    sum_veg = veg * PRICE_VEG
-    sum_fresh = fresh * PRICE_FRESH
-    sum_freeze = freeze * PRICE_FREEZE
+    # Считаем сумму по каждой категории отдельно для красивого вывода, используя цены из cfg
+    sum_alc = alc * cfg['price_alc']
+    sum_dry = dry * cfg['price_dry']
+    sum_veg = veg * cfg['price_veg']
+    sum_fresh = fresh * cfg['price_fresh']
+    sum_freeze = freeze * cfg['price_freeze']
 
     # Формируем сообщение
     # Используем символ '×' (крестик), чтобы не ломать Markdown звездочками
     txt = (
         "✅ Смена посчитана!\n\n"
-        f"🍷 Алко: {alc} × {PRICE_ALC} = {sum_alc:.2f}\n"
-        f"📦 Сухой: {dry} × {PRICE_DRY} = {sum_dry:.2f}\n"
-        f"🥦 Овощи: {veg} × {PRICE_VEG} = {sum_veg:.2f}\n"
-        f"🍎 Фреш: {fresh} × {PRICE_FRESH} = {sum_fresh:.2f}\n"
-        f"❄️ Заморозка: {freeze} × {PRICE_FREEZE} = {sum_freeze:.2f}\n\n"
+        f"🍷 Алко: {alc} × {cfg['price_alc']:.2f} = {sum_alc:.2f}\n"
+        f"📦 Сухой: {dry} × {cfg['price_dry']:.2f} = {sum_dry:.2f}\n"
+        f"🥦 Овощи: {veg} × {cfg['price_veg']:.2f} = {sum_veg:.2f}\n"
+        f"🍎 Фреш: {fresh} × {cfg['price_fresh']:.2f} = {sum_fresh:.2f}\n"
+        f"❄️ Заморозка: {freeze} × {cfg['price_freeze']:.2f} = {sum_freeze:.2f}\n\n"
         
         f"📦 Всего коробок: *{sum_boxes:.0f}*\n\n"
         
-        "🧮 *Расчёт зарплаты:*\n" + "\n".join(lines) + "\n\n"
+        "🧮 *Расчёт зарплаты:*\n" + "\n".join(calculation_details) + "\n\n"
         
-        f"💵 Итог за смену: *{total:.2f} руб.*\n"
+        f"💵 Итог за смену: *{final_total_income:.2f} руб.*\n"
         f"📅 Итог за месяц: *~{sum_after:.2f} руб.*"
     )
     
@@ -778,10 +907,84 @@ def process_step_5(message, field_name):
     # Очищаем временные данные
     step_data.pop(message.chat.id, None)
 
+
+# ==========================================
+#           АДМИН-ПАНЕЛЬ (НАСТРОЙКИ)
+# ==========================================
+
+@bot.message_handler(commands=['get_cfg'])
+def admin_get_config(message):
+    # 1. Проверка: только ты (админ) можешь это видеть
+    if message.chat.id != ADMIN_ID:
+        return
+
+    text = "🛠 **ТЕКУЩИЕ НАСТРОЙКИ**\n\n"
+    
+    # Проходимся по всем настройкам и добавляем описание
+    for key, value in cfg.items():
+        # Берем описание из словаря или пишем "Нет описания", если забыли добавить
+        description = CONFIG_DESCRIPTIONS.get(key, "—")
+        
+        # Формируем строку:
+        # 🔹 norm = 1852.0
+        # └ 🎯 Норма выручки (S)
+        text += f"🔹 `{key}` = `{value}`\n└ _{description}_\n\n"
+    
+    text += "✏️ **Как менять:**\n`/set_cfg переменная значение`\n\nПример: `/set_cfg norm 2000`"
+    
+    bot.send_message(message.chat.id, text, parse_mode="Markdown")
+
+
+@bot.message_handler(commands=['set_cfg'])
+def admin_set_config(message):
+    if message.chat.id != ADMIN_ID:
+        return
+
+    try:
+        parts = message.text.split()
+        # Проверяем, что введено 3 части: команда, ключ, значение
+        if len(parts) != 3:
+            bot.send_message(message.chat.id, "⚠️ **Ошибка ввода!**\nФормат: `/set_cfg код_переменной значение`\n\nПример: `/set_cfg hourly_rate 250`", parse_mode="Markdown")
+            return
+        
+        key = parts[1]
+        val_str = parts[2].replace(',', '.') # Если ввел 1,15 заменим на 1.15
+        
+        # Проверяем, существует ли такой ключ в наших настройках
+        if key not in cfg:
+            bot.send_message(message.chat.id, f"❌ Нет такой переменной: `{key}`\nИспользуй /get_cfg чтобы посмотреть список.", parse_mode="Markdown")
+            return
+
+        # Пробуем превратить введенное значение в число
+        value = float(val_str)
+        
+        # Сохраняем
+        old_value = cfg[key]
+        cfg[key] = value
+        save_config()
+        
+        description = CONFIG_DESCRIPTIONS.get(key, "значение")
+        
+        bot.send_message(
+            message.chat.id, 
+            f"✅ **Успешно изменено!**\n\n"
+            f"📝 {description}\n"
+            f"Было: `{old_value}`\n"
+            f"Стало: `{value}`",
+            parse_mode="Markdown"
+        )
+        
+    except ValueError:
+        bot.send_message(message.chat.id, "❌ **Ошибка:** Значение должно быть числом (например `0.22` или `1852`).")
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ Произошла ошибка: {e}")
+
+
 # Придумай сложное имя команды (никто не должен его знать)
 SECRET_CMD = "super_admin_msg_9911" 
 # Придумай пароль для рассылки
 BROADCAST_PASS = "7733"
+
 
 @bot.message_handler(commands=[SECRET_CMD])
 def handle_broadcast(message):
@@ -916,4 +1119,120 @@ def reminder_loop():
 if __name__ == "__main__":
     reminder_thread = threading.Thread(target=reminder_loop, daemon=True)
     reminder_thread.start()
+
+# ==========================================
+#          РАСПОЗНАВАНИЕ ТАБЛИЦ
+# ==========================================
+
+# Вставь сюда свой ключ, который получил в личном кабинете GigaChat
+# Или добавь в настройки хостинга переменную GIGACHAT_KEY
+GIGACHAT_KEY = os.getenv('MDE5YzI1NjQtNDVjNy03ZWNmLThmYmUtY2ZmNjc4NDA3MWJkOjhjZjFhZTBkLTYzNjMtNDM0NC1iZDc0LWM1ODcwYzUxNTI0Yw==') 
+
+@bot.message_handler(content_types=['photo'])
+def handle_photo_table(message):
+    # Только админ может отправлять фото для расчета (чтобы не тратить лимиты)
+    if message.chat.id != ADMIN_ID:
+        return
+
+    if not GIGACHAT_KEY:
+        bot.send_message(message.chat.id, "❌ Ошибка: Не указан GIGACHAT_KEY в настройках бота.")
+        return
+
+    status_msg = bot.send_message(message.chat.id, "👀 Вижу таблицу. Отправляю в GigaChat...\n_(Жди 10-20 сек)_")
+
+    try:
+        # 1. Получаем файл
+        file_info = bot.get_file(message.photo[-1].file_id)
+        downloaded_file = bot.download_file(file_info.file_path)
+
+        # 2. Работаем с GigaChat
+        # verify_ssl_certs=False нужно, чтобы на хостинге не ругалось на русские сертификаты
+        with GigaChat(credentials=GIGACHAT_KEY, verify_ssl_certs=False) as giga:
+            
+            # А) Загружаем картинку во временное хранилище Сбера
+            # Это самый экономный по памяти способ
+            uploaded_img = giga.upload_file(downloaded_file)
+            img_id = uploaded_img.id
+            
+            # Б) Пишем промпт
+            prompt = (
+                "Проанализируй таблицу на фото. Это отчет по сбору товаров. "
+                "Мне нужен JSON-список. Каждый элемент: "
+                "{'name': 'ФИО полностью', 'type': 'Тип (Alko, Dry, Fresh и тд)', 'qty': число_упаковок}. "
+                "Количество упаковок — это число в последнем столбце. Не путай с паллетами! "
+                "Верни ТОЛЬКО JSON список."
+            )
+
+            # В) Делаем запрос
+            response = giga.chat({
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": prompt,
+                        "attachments": [img_id] # Передаем ID картинки
+                    }
+                ]
+            })
+            
+            answer_text = response.choices[0].message.content
+            
+            # 3. Чистим ответ (иногда нейросеть добавляет ```json в начале)
+            clean_json = answer_text.replace("```json", "").replace("```", "").strip()
+            data = json.loads(clean_json)
+
+            # 4. Собираем статистику
+            # Формат: {'Иванов': {'veg': 0, 'alko': 0 ...}}
+            report_data = {}
+
+            for row in data:
+                name = row.get('name', 'Неизвестный')
+                t = row.get('type', '').lower()
+                try:
+                    q = float(row.get('qty', 0))
+                except:
+                    q = 0.0
+                
+                if name not in report_data:
+                    report_data[name] = {'alc': 0, 'dry': 0, 'veg': 0, 'fresh': 0, 'freeze': 0}
+                
+                # Распределяем по категориям (подстрой под свои названия в таблице)
+                if 'alko' in t: report_data[name]['alc'] += q
+                elif 'dry' in t: report_data[name]['dry'] += q
+                elif 'fresh' in t: report_data[name]['fresh'] += q
+                elif 'frozen' in t or 'freeze' in t: report_data[name]['freeze'] += q
+                # Обычно F&V или Veg
+                else: report_data[name]['veg'] += q 
+
+            # 5. Формируем текст ответа
+            final_text = "📊 **Расчет по таблице:**\n\n"
+            
+            for worker, boxes in report_data.items():
+                # Считаем зарплату (используем твою функцию)
+                # user_id=0 значит стаж будет 0% (мы не знаем стаж по фото)
+                income, _, _, _ = calculate_income(
+                    boxes['veg'], boxes['fresh'], boxes['dry'], boxes['alc'], boxes['freeze'], 
+                    user_id=0 
+                )
+                
+                total_b = sum(boxes.values())
+                final_text += (
+                    f"👤 **{worker}**\n"
+                    f"📦 Коробок: {total_b:.0f}\n"
+                    f"💰 ЗП (без стажа): **{income:.2f} руб.**\n"
+                    f"────────────────\n"
+                )
+
+            # Если сообщение слишком длинное, Телеграм не пропустит, режем
+            if len(final_text) > 4096:
+                for x in range(0, len(final_text), 4096):
+                    bot.send_message(message.chat.id, final_text[x:x+4096], parse_mode="Markdown")
+            else:
+                bot.send_message(message.chat.id, final_text, parse_mode="Markdown")
+            
+            # Удаляем сообщение "Жди..."
+            bot.delete_message(message.chat.id, status_msg.message_id)
+
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ Не вышло распознать: {e}")
+
     bot.infinity_polling()
