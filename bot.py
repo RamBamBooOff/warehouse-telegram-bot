@@ -287,7 +287,6 @@ def get_total_users():
 
 def calculate_income(veg, fresh, dry, alc, freeze, user_id):
     # 1. Считаем базовую сумму по коробкам (base_sum_boxes, аналог S)
-    # Цены берем из конфига cfg
     base_sum_boxes = (
         veg * cfg['price_veg'] + 
         fresh * cfg['price_fresh'] + 
@@ -296,6 +295,7 @@ def calculate_income(veg, fresh, dry, alc, freeze, user_id):
         freeze * cfg['price_freeze']
     )
     
+    # Список для строк с детализацией расчета
     detail_lines = []
     detail_lines.append(f"📦 Сумма коробок S = {base_sum_boxes:.2f} руб.")
     
@@ -305,56 +305,59 @@ def calculate_income(veg, fresh, dry, alc, freeze, user_id):
     GOLD_BOX_MULTIPLIER = cfg['gold_rate_coeff']
     HOURLY_WAGE = cfg['hourly_rate']
     SHIFT_HOURS = cfg['work_hours_per_shift']
-    PREMIUM_TO_WAGE_PCT = cfg['premium_to_hourly_pct']   # 22%
-    NIGHT_SHIFT_PREMIUM_RATE_PCT = cfg['night_shift_premium_pct'] # 20%
+    PREMIUM_TO_WAGE_PCT = cfg['premium_to_hourly_pct']
+    NIGHT_SHIFT_PREMIUM_RATE_PCT = cfg['night_shift_premium_pct']
     
     # 2. Считаем фиксированную часть (Оклад + 22%) * 10.5
-    # Эта часть постоянна для обоих основных расчетов (S >= NORM_THRESHOLD и S < NORM_THRESHOLD)
     fixed_base_income_part = (HOURLY_WAGE * (1 + PREMIUM_TO_WAGE_PCT)) * SHIFT_HOURS
     
-    # 3. Основная формула дохода на основе суммы коробок (income_from_boxes_and_fixed, аналог A)
+    # 3. Основная формула дохода (income_from_boxes_and_fixed)
     income_from_boxes_and_fixed = 0.0
     if base_sum_boxes >= NORM_THRESHOLD:
-        # (S - Норма) * Коэффициент * ЗолотойКоэффициент + Норма * Коэффициент + Фикс. часть
-        # Доплата за перевыполнение нормы (золотые короба)
+        # --- ИЗМЕНЕНО: Формируем строку в старом стиле ---
         over_norm_bonus = (base_sum_boxes - NORM_THRESHOLD) * MAIN_RATE_COEFF * GOLD_BOX_MULTIPLIER
-        # Доплата за достижение нормы
         norm_achieved_payout = NORM_THRESHOLD * MAIN_RATE_COEFF
-        
         income_from_boxes_and_fixed = over_norm_bonus + norm_achieved_payout + fixed_base_income_part
-        detail_lines.append(f"S ≥ {NORM_THRESHOLD:.2f} → Перевыполнение + Норма + Фикс. оклад")
-        detail_lines.append(f"Промежуточный итог (формула А) = {income_from_boxes_and_fixed:.2f}")
+        
+        # Собираем красивую строку-формулу
+        combined_multiplier = MAIN_RATE_COEFF * GOLD_BOX_MULTIPLIER
+        combined_fixed_part = norm_achieved_payout + fixed_base_income_part
+        formula_line = (
+            f"S ≥ {NORM_THRESHOLD:.2f} → ({base_sum_boxes:.2f} - {NORM_THRESHOLD:.2f}) "
+            f"× {combined_multiplier:.2f} + {combined_fixed_part:.2f} = {income_from_boxes_and_fixed:.2f}"
+        )
+        detail_lines.append(formula_line)
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     else:
-        # S + Фикс. часть
+        # --- ИЗМЕНЕНО: Формируем строку в старом стиле ---
         income_from_boxes_and_fixed = base_sum_boxes + fixed_base_income_part
-        detail_lines.append(f"S < {NORM_THRESHOLD:.2f} → S + Фикс. оклад")
-        detail_lines.append(f"Промежуточный итог (формула А) = {income_from_boxes_and_fixed:.2f}")
+        formula_line = (
+            f"S < {NORM_THRESHOLD:.2f} → {base_sum_boxes:.2f} + {fixed_base_income_part:.2f} "
+            f"= {income_from_boxes_and_fixed:.2f}"
+        )
+        detail_lines.append(formula_line)
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
-    # 4. Проверка на утреннюю смену (income_after_morning_premium, аналог D)
-    # Если смена утром: income_from_boxes_and_fixed + (Оклад * 20%) * Часы
+    # 4. Проверка на утреннюю смену (income_after_morning_premium)
+    income_after_morning_premium = income_from_boxes_and_fixed
     morning_shift_additional_premium = 0.0
     if is_morning():
+        # --- ИЗМЕНЕНО: Формируем строку в старом стиле ---
         morning_shift_additional_premium = (HOURLY_WAGE * NIGHT_SHIFT_PREMIUM_RATE_PCT) * SHIFT_HOURS
-        income_after_morning_premium = income_from_boxes_and_fixed + morning_shift_additional_premium
-        detail_lines.append(f"🌅 Расчеты проведены утром (+{NIGHT_SHIFT_PREMIUM_RATE_PCT*100:.0f}%): +{morning_shift_additional_premium:.2f} руб.")
-    else:
-        income_after_morning_premium = income_from_boxes_and_fixed
-        detail_lines.append("🏙 Расчеты проведены вечером: без доплаты за ночные.")
+        income_after_morning_premium += morning_shift_additional_premium
+        detail_lines.append(f"🌅 Утренняя смена → +{morning_shift_additional_premium:.2f} руб. = {income_after_morning_premium:.2f}")
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     
-    detail_lines.append(f"Итог после доплаты за ночь (формула D) = {income_after_morning_premium:.2f}")
-
     # 5. Доплата за стаж
-    # final_income = income_after_morning_premium + (Оклад * процент_стажа) * Часы
-    seniority_bonus_percentage = get_experience_percent(user_id) # вернет, например, 0.05
-    
+    final_total_income = income_after_morning_premium
+    seniority_bonus_percentage = get_experience_percent(user_id)
     seniority_bonus_amount = 0.0
     if seniority_bonus_percentage > 0:
+        # --- ИЗМЕНЕНО: Формируем строку в старом стиле ---
         seniority_bonus_amount = (HOURLY_WAGE * seniority_bonus_percentage) * SHIFT_HOURS
-        final_total_income = income_after_morning_premium + seniority_bonus_amount
-        detail_lines.append(f"🎖 Доплата за стаж ({seniority_bonus_percentage*100:.0f}%): +{seniority_bonus_amount:.2f} руб.")
-    else:
-        final_total_income = income_after_morning_premium
-        detail_lines.append("Стаж менее 6 месяцев: доплата 0 руб.")
+        final_total_income += seniority_bonus_amount
+        detail_lines.append(f"🎖 Доплата за стаж → +{seniority_bonus_amount:.2f} руб. = {final_total_income:.2f}")
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     return final_total_income, base_sum_boxes, detail_lines, seniority_bonus_amount
 
